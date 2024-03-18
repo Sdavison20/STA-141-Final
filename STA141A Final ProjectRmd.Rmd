@@ -1,0 +1,1239 @@
+---
+title: "Predictive Modeling of Neural Activity and Behavioral Outcomes in Decision-Making in Mice"
+date: "3/18/2024"
+author: "Samuel Davison"
+output: html_document
+---
+```{r echo=FALSE, eval=TRUE, results='hide',setup}
+library(readr)
+library(dplyr)    
+library(tidyr)
+library(ggplot2)
+library(tibble)
+library(caret)
+library(rlang)
+library(cli)
+library(tibble)
+library(ROCR)
+library(tidyverse)
+library(xgboost)
+library(pROC)
+
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('C:/STA 141A Project//Data/session',i,'.rds',sep=''))
+}
+
+describe_session <- function(session) {
+  num_neurons <- length(session$spks) 
+  num_trials <- length(session$contrast_left) 
+  stimuli_conditions <- unique(cbind(session$contrast_left, session$contrast_right))
+  feedback_types <- unique(session$feedback_type)
+
+}
+
+```
+
+```{r, tibble setup, echo=FALSE, results='hide'}
+binename <- paste0("bin", as.character(1:40))
+get_trail_data <- function(session_id, trail_id){
+  spikes <- session[[session_id]]$spks[[trail_id]]
+  if (any(is.na(spikes))){
+    disp("value missing")
+  }
+
+  trail_tibble <- as_tibble(spikes) %>% set_names(binename) %>%  add_column("brain_area" = session[[session_id]]$brain_area ) %>% group_by(brain_area) %>% summarize( "sum_spikes" =across(everything(),sum),.groups = "drop") 
+  trail_tibble <- tibble("neuron_spike" = rowSums(spikes))  %>%  add_column("brain_area" = session[[session_id]]$brain_area ) %>% group_by(brain_area) %>% summarize( region_sum_spike = sum(neuron_spike), region_count = n(),region_mean_spike = mean(neuron_spike)) 
+  trail_tibble  = trail_tibble%>% add_column("trail_id" = trail_id) %>% add_column("contrast_left"= session[[session_id]]$contrast_left[trail_id]) %>% add_column("contrast_right"= session[[session_id]]$contrast_right[trail_id]) %>% add_column("feedback_type"= session[[session_id]]$feedback_type[trail_id])
+  
+}
+get_session_data <- function(session_id){
+  n_trail <- length(session[[session_id]]$spks)
+  trail_list <- list()
+  for (trail_id in 1:n_trail){
+    trail_tibble <- get_trail_data(session_id,trail_id)
+    trail_list[[trail_id]] <- trail_tibble
+  }
+  session_tibble <- do.call(rbind, trail_list)
+  session_tibble <- session_tibble %>% add_column("mouse_name" = session[[session_id]]$mouse_name) %>% add_column("date_exp" = session[[session_id]]$date_exp) %>% add_column("session_id" = session_id) 
+}
+
+session_list = list()
+for (session_id in 1: 18){
+  session_list[[session_id]] <- get_session_data(session_id)
+}
+full_tibble <- do.call(rbind, session_list)
+full_tibble$success <- full_tibble$feedback_type == 1
+full_tibble$success <- as.numeric(full_tibble$success)
+full_tibble$contrast_diff <- abs(full_tibble$contrast_left-full_tibble$contrast_right)
+
+binename <- paste0("bin", as.character(1:40))
+
+get_trail_functional_data <- function(session_id, trail_id){
+  spikes <- session[[session_id]]$spks[[trail_id]]
+  if (any(is.na(spikes))){
+    disp("value missing")
+  }
+
+  trail_bin_average <- matrix(colMeans(spikes), nrow = 1)
+  colnames(trail_bin_average) <- binename
+  trail_tibble  = as_tibble(trail_bin_average)%>% add_column("trail_id" = trail_id) %>% add_column("contrast_left"= session[[session_id]]$contrast_left[trail_id]) %>% add_column("contrast_right"= session[[session_id]]$contrast_right[trail_id]) %>% add_column("feedback_type"= session[[session_id]]$feedback_type[trail_id])
+  
+}
+get_session_functional_data <- function(session_id){
+  n_trail <- length(session[[session_id]]$spks)
+  trail_list <- list()
+  for (trail_id in 1:n_trail){
+    trail_tibble <- get_trail_functional_data(session_id,trail_id)
+    trail_list[[trail_id]] <- trail_tibble
+  }
+  session_tibble <- as_tibble(do.call(rbind, trail_list))
+  session_tibble <- session_tibble %>% add_column("mouse_name" = session[[session_id]]$mouse_name) %>% add_column("date_exp" = session[[session_id]]$date_exp) %>% add_column("session_id" = session_id) 
+}
+
+session_list = list()
+for (session_id in 1: 18){
+  session_list[[session_id]] <- get_session_functional_data(session_id)
+}
+full_functional_tibble <- as_tibble(do.call(rbind, session_list))
+full_functional_tibble$session_id <- as.factor(full_functional_tibble$session_id )
+full_functional_tibble$contrast_diff <- abs(full_functional_tibble$contrast_left-full_functional_tibble$contrast_right)
+
+full_functional_tibble$success <- full_functional_tibble$feedback_type == 1
+full_functional_tibble$success <- as.numeric(full_functional_tibble$success)
+
+full_tibble %>% filter (trail_id==1) %>% group_by(session_id) %>% summarise(sum(region_count))
+
+full_tibble %>% group_by(session_id) %>% summarise(unique_area = n_distinct(brain_area))
+
+average_spike <-full_tibble %>% group_by( session_id, trail_id) %>% mutate(mean_spike = sum(region_sum_spike)/sum(region_count))
+average_spike %>% group_by(session_id) %>% summarise(mean_session_spike = mean(mean_spike))
+
+
+full_functional_tibble %>% group_by(session_id) %>% summarize(success_rate = mean(success, na.rm = TRUE))
+
+
+full_functional_tibble %>% group_by(mouse_name) %>% summarize(success_rate = mean(success, na.rm = TRUE))
+
+full_functional_tibble %>% group_by(contrast_diff) %>% count() %>% 
+  ungroup() %>% 
+  mutate(perc = `n` / sum(`n`)) %>% 
+  arrange(perc) %>%
+  mutate(labels = scales::percent(perc))
+
+full_functional_tibble %>% group_by(contrast_diff) %>% summarize(success_rate = mean(success, na.rm = TRUE))
+
+counts_df <- full_functional_tibble[c('mouse_name', 'contrast_diff')]
+counts_df$contrast_diff <- as.factor(counts_df$contrast_diff)
+counts <- table(counts_df)
+
+percentages <- prop.table(counts, margin = 1)
+
+```
+
+
+# Abstract
+This project aims to present a comprehensive predictive model to understand the relationship between mouse neural activity and outcomes from a behavioral test. The data set comes from Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x , which contains data on 18 sessions with 4 different mice. The final predictive model used included the session I.D (1-18), the trial I.D (varies between sessions), the contrast of the right and left screens, the difference in contrast between the two screens, and the average spike rate time for every time“bin”. Multiple models were considered including a logistic regression, and a model based in XGBoost, but XGBoost was chosen as the final model due to its high prediction accuracy.  
+
+# Introduction
+The predictive model is based on data collected from 18 sessions of rat experiments, consisting of 4 total subjects. The primary goal of the experiments was to gather information on rat neuronal data, in the form of neuron spikes contained within time bins. To do this, researchers would show each mouse two screens. These screens would take 4 different contrast values, 0, o.25, 0.5, and 1. In each subject area, the researchers positioned a wheel that could be turned left or right, or kept steady. If the screen on the left had a higher contrast value than the right, then a success would be defined if the mouse turned the wheel to the left, the same applies to the right. If the contrasts were both of values 0, a success was defined if the wheel was kept steady, and finally, if they were the same but not 0, a success is random between the two sides. In addition to the neuronal data, researchers also collected information on the brain area in which the spike occurred. 
+
+# Exploratory Analysis
+First, I wanted to visualize the distribution of the data across trials to see if there were trials that would be more predictive than others. Session 10 had the most trials of the sessions and session 1 had the least.  For this reason, I focused my preliminary analysis on session 10.
+
+```{r ,exploratory total trials}
+##Data Structures
+number_of_trials <- table(full_tibble$session_id)
+barplot(number_of_trials, main="Number of Trials per Session", xlab="Session ID", ylab="Number of Trials")
+
+```
+After isolating session 10, we can see that the success rate (given by a feedback type of 1), is around 62% for this session. This implies that there is something else besides random guessing that is driving the decision of which way to turn the wheel.  In our data, we can reasonably conclude that it's due to the difference in contrast between the two screens, but identifying which neuronal spikes are responsible for a correct decision choice.  After looking at session 10, the next step involves looking at the rest of the sessions to determine what it looks like for all mice across sessions. The overall success rate was about 70.4%, which compared to session 10 is around 10% higher. Now, I wanted to see what the success rate from session to session looked like. As you can see, in general, the mice’s performance generally improved over time, with some exceptions. This further increases the evidence that our model should incorporate some time adjusted variable which takes into account how many previous trials each mouse was subjected to. Furthermore, we can see that each mouse has a different rate of success, implying there are some random effects in our model from the cognitive ability of the 4 mouse subjects. With Lederberg having the highest success rate, even at his first trail and Cori having the lowerst success rate. 
+
+```{r session 10 bp, echo=FALSE}
+feedback_types <- table(full_tibble$feedback_type)
+barplot(feedback_types, main="Feedback Types", xlab="Feedback Type", ylab="Count")
+session_10_data <- full_tibble %>% filter(session_id == 10)
+feedback_types_session_10 <- table(session_10_data$feedback_type)
+
+feedback_types_percentages <- round((feedback_types_session_10 / sum(feedback_types_session_10)) * 100, 1)
+
+# Create a bar plot for feedback types for session 10
+bp <- barplot(feedback_types_session_10, 
+              main = "Feedback Types for Session 10", 
+              xlab = "Feedback Type", 
+              ylab = "Count",
+              col = "blue", # You can choose a color
+              ylim = c(0, max(feedback_types_session_10) * 1.2)) # Extend y-limits for text
+
+text(x = bp, y = feedback_types_session_10, label = paste(feedback_types_percentages, "%"), pos = 3, cex = 0.8)
+
+```
+
+```{r bar plot, echo = FALSE}
+feedback_types_overall <- full_tibble %>%
+  group_by(feedback_type) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(percentage = count / sum(count)) %>%
+  arrange(desc(percentage)) 
+ggplot(feedback_types_overall, aes(x = as.factor(feedback_type), y = percentage, fill = as.factor(feedback_type))) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = sprintf("%0.1f%%", percentage * 100)), vjust = -0.3, check_overlap = TRUE) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(title = "Overall Feedback Type Percentages", x = "Feedback Type", y = "Percentage") +
+  theme_minimal() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+
+
+
+```
+
+```{r, by mouse and by session, echo = FALSE}
+##Success Rate by Mouse
+success_rate_by_mouse <- full_tibble %>%
+  group_by(mouse_name) %>%
+  summarize(success_rate = mean(success))
+ggplot(success_rate_by_mouse, aes(x = mouse_name, y = success_rate, fill = mouse_name)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Success Rate by Mouse", x = "Mouse", y = "Success Rate") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+##Success Rate by Session
+success_rate_by_session <- full_tibble %>%
+  group_by(session_id) %>%
+  summarize(success_rate = mean(success, na.rm = TRUE),
+            mouse_name = first(mouse_name)) 
+
+# Create a bar plot with success rate by session
+ggplot(success_rate_by_session, aes(x = as.factor(session_id), y = success_rate)) +
+  geom_bar(stat = "identity", aes(fill = as.factor(session_id))) +
+  geom_text(aes(label = mouse_name), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.25, 
+            check_overlap = TRUE) + # Prevent text label overlap
+  labs(title = "Success Rate by Session", x = "Session ID", y = "Success Rate") +
+  theme_minimal() +
+  theme(legend.position = "none", # Remove legend if not needed
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Next I wanted to identify if spike activity was something that varied significantly among trials, and if certain spikes were associated with correct decision making. In this case, I plot the spike activity for session 10 to see if there is any pattern. In the case, of session 10, there is not much information to be gained from this, other than some spikes tend to spike much higher than others. Thus, more rigorous analysis is required.
+
+```{r,Individual Spike Activity, echo=FALSE}
+##Plot for individual spike activity 
+plot_neural_activity <- function(session) {
+  average_spike_rate <- sapply(session$spks, function(neuron_spikes) rowMeans(neuron_spikes))
+  boxplot(average_spike_rate, main="Average Spike Rate per Neuron", ylab="Spike Rate", xlab="Neuron")
+}
+    
+plot_neural_activity(session[[10]])
+
+
+aggregate_sessions_by_mouse <- function(session) {
+  aggregated_by_mouse <- list()
+}
+  
+  for (i in seq_along(session)) {
+    current_session <- session[[i]]
+    mouse_name <- current_session[[4]]  # Accessing the mouse name
+  }
+```
+
+The next reasonable step is to see if there is any pattern in the neuronal activity as time goes on, and if the success rate is associated with the change in neuronal activity. From the two graphs, we can see that in the early stages of session 10, there was a fairly significant spike in success performance, associated with relatively flat neuronal activity. But as the success rate starts to flatten at just over 60%, neuronal activity spikes, potentially as a result of  a learning mechanism in the mouse as performance flat lines. This suggests that neuronal spiking is at least in part involved in the success of the mouse as trials go on, and not as much in the beginning of each session. 
+
+
+``` {r,neural activity 10 + session 10 over time, echo = FALSE}
+#Average neural activity per trial session 10
+ggplot(session_10_data, aes(x = trail_id, y = region_mean_spike)) +
+  geom_line(stat = "summary", fun = mean) +
+  labs(title = "Average Neural Activity per Trial for Session 10", 
+       x = "Trial ID", 
+       y = "Mean Spike Rate") +
+  theme_minimal()
+
+#session 10 success over time
+session_10_data <- full_tibble %>% 
+  filter(session_id == 10) %>%
+  arrange(trail_id) %>%
+  mutate(cumulative_success = cummean(success))
+ggplot(session_10_data, aes(x = trail_id, y = cumulative_success)) +
+  geom_line(group = 1, color = "blue") +
+  labs(title = "Cumulative Average Success Rate per Trial for Session 10", 
+       x = "Trial ID", 
+       y = "Cumulative Average Success Rate") +
+  theme_minimal()
+```
+
+```{r, session 10 over time, echo = FALSE}
+
+##Neural Activities During Each Trial All Trials
+ggplot(full_tibble, aes(x = trail_id, y = region_mean_spike)) +
+  geom_line(stat='summary', fun.y=mean) +
+  labs(title="Average Neural Activity per Trial", x="Trial ID", y="Mean Spike Rate") +
+  theme_minimal()
+
+##Success rate over time all trials
+full_tibble <- full_tibble %>%
+  arrange(session_id, trail_id) %>%
+  group_by(session_id) %>%
+  mutate(cumulative_success = cummean(success)) %>%
+  ungroup()
+ggplot(full_tibble, aes(x = trail_id, y = cumulative_success, group = session_id, color = as.factor(session_id))) +
+  geom_line() +
+  labs(title = "Cumulative Average Success Rate per Trial Across All Sessions", 
+       x = "Trial ID", 
+       y = "Cumulative Average Success Rate") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+##Changes Across Trials
+p <- ggplot(full_tibble, aes(x = trail_id, y = region_mean_spike, group = session_id, color = as.factor(session_id))) +
+  geom_line() +
+  labs(title="Neural Activity Change Across Trials", x="Trial ID", y="Average Spike Rate") +
+  theme_minimal()
+  p + theme(legend.position = "bottom") +
+    guides(color = guide_legend(nrow = 2, byrow = TRUE, title.position = "top", title.hjust = 0.5))
+  
+# Boxplot of neural activity by session
+ggplot(full_tibble, aes(x = as.factor(session_id), y = region_mean_spike)) +
+  geom_boxplot() +
+  labs(title="Neural Activity Across Sessions", x="Session ID", y="Average Spike Rate") +
+  theme_minimal()
+
+# Boxplot of neural activity by mouse
+ggplot(full_tibble, aes(x = mouse_name, y = region_mean_spike)) +
+  geom_boxplot() +
+  labs(title="Neural Activity Across Mice", x="Mouse Name", y="Average Spike Rate") +
+  theme_minimal()
+
+```
+
+Now that we expect to see some correlation between neuronal spiking and performance on the test, it makes sense to plot the average spike rate of each session as well as the average spike rate for each mouse. We can see that Cori, the mouse with the lowest success rate, has the highest median spike rate of the 4 subjects. But Forssmann, who has the second highest overall success rate has a much lower average spike rate. This tells us that the average spike rate is probably not related to performance in a meaningful way, but specific spiking regions likely correspond to success. In addition, I plotted the Neural activity across all sessions, and we observe the same pattern as before, with higher trails exhibiting lower neural activity. Once again, cognitive load could be a factor, or perhaps the subjects simply get bored of the trials after their performance has flat lined. knowing this we can begin to integrate our data in a way so that we can examine all trials across all sessions.
+
+# Data Integration 
+Starting off, we retrieve each session by their session ID, and process each trial within each session to extract and calculate number of different features. These include, the individual spike data, which are summed up and averaged across each trial. Next, we create decision variable, which is assigned based on the comparison between contrast of the left screen and contrast of the right screen. Furthermore, we include metadata like the mouse's name for easy identification and finally we aggregated the trial data by binding each row to the session I.D. Next, I filter for a specific trail, then group by session I.D, which tells us the total count of regions that may be of interest and add a column for the distinct brain areas involved per session. Because the difference in contrast between the two screens is likely affecting whether or not the subjects get it correct, I add a new variable that accounts for the absolute difference in contrast between the two screens.  
+
+
+
+```{r, testing 10, echo = FALSE}
+
+n.session=length(session)
+
+n_success = 0
+n_trial = 0
+for(i in 1:n.session){
+    tmp = session[[i]];
+    n_trial = n_trial + length(tmp$feedback_type);
+    n_success = n_success + sum(tmp$feedback_type == 1);
+}
+
+tmp10 = session[[10]];
+n_trial10 = 0
+n_success10 = 0
+n_trial10 = length(tmp10$feedback_type)
+n_success10 = sum(tmp10$feedback_type == 1)
+success_rate10 = n_success10 / n_trial10
+
+area = c()
+for(i in 1:n.session){
+    tmp = session[[i]];
+    area = c(area, unique(tmp10$brain_area))
+}
+
+area = unique(area)
+
+area10 = unique(tmp10$brain_area)
+n_unique_areas10 = length(area10)
+
+n_obs = length(session[[10]]$feedback_type)
+
+dat = tibble(
+    feedback_type = as.factor(session[[10]]$feedback_type),
+    decision = rep('name', n_obs),
+    avg_spikes = rep(0, n_obs)
+)
+
+for (i in 1:n_obs){
+    # decision 
+    if (session[[10]]$contrast_left[i] > session[[10]]$contrast_right[i]){
+        dat$decision[i] = '1' 
+    } else if (session[[10]]$contrast_left[i] < session[[10]]$contrast_right[i]){
+        dat$decision[i] = '2' 
+    } else if (session[[10]]$contrast_left[i] == session[[10]]$contrast_right[i] 
+               & session[[10]]$contrast_left[i] == 0){
+        dat$decision[i] = '3' 
+    } else{
+        dat$decision[i] = '4' 
+    }
+    spks.trial = session[[10]]$spks[[i]]
+    total.spikes = apply(spks.trial, 1, sum)  
+    dat$avg_spikes[i] = mean(total.spikes)  
+}
+
+dat$decision = as.factor(dat$decision)
+model_results <- list()
+
+``` 
+
+# Predictive Modeling 
+Now that we have our data in a tibble where we can see analyze it in a more convenient way. We should look at what exactly is happening in the spikes of individual rats over the trials. To do this, we first create a bar plot that shows the relationship between contrast difference and each mouse. From that we can see that the contrast difference is very strongly connected to the percentage. This implies that including this in the model will increase accuracy. The second iplotwith multiple bar charts represents the success rate across different trial groups for a single session ID. Each panel corresponds to a different session ID, showing the success rate across the range of trial groups.: Similar to the previous plot, the next bar chart displays the success rate but it is faceted by mouse name, because we are interested in how individual mice perform across different trial groups. Next, the series of line plots represents the average spike measure across trial IDs for different session IDs. I also include our PCA analysis by both session and by mouse, which helps us to determine whether or not to include it in the predictive model. 
+
+Now that we have our data visualized, we can finally start to fit a predictive model. I prepared a group fo predictive features, and transform the categorical variables into a numerical format so that our XGBoost model can process them correctly. 
+
+The Boost Model is a advanced model that used gradient boosting algorithms with a specified number of "boosting rounds". In this case, we choose 10. Before we test our model against the testing data, I fit this model to our current data by splitting it and we achieve 73% accuracy. 
+
+
+
+
+
+```{r, echo = FALSE}
+
+percentages_df <- as.data.frame(as.table(percentages))
+names(percentages_df) <- c("mouse_name", "contrast_diff", "percentage")
+ggplot(percentages_df, aes(x = contrast_diff, y = percentage, fill = mouse_name)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "Contrast Difference", y = "Percentage", title = "Relationship between Contrast Difference and Percentage") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Pastel1")
+
+full_functional_tibble$trail_group = cut(full_functional_tibble$trail_id, breaks = seq(0, max(full_functional_tibble$trail_id), by = 25),include.lowest = TRUE)
+levels(full_functional_tibble$trail_group) <- seq(0, max(full_functional_tibble$trail_id), by = 25)[2:18]
+
+success_rate <- aggregate(success ~ session_id + trail_group, data = full_functional_tibble, FUN = function(x) mean(x) )
+ggplot(success_rate, aes(x = trail_group, y = success)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~session_id, ncol=3) +
+      theme_bw()
+
+success_rate <- aggregate(success ~ mouse_name + trail_group, data = full_functional_tibble, FUN = function(x) mean(x) )
+ggplot(success_rate, aes(x = trail_group, y = success)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~mouse_name) +
+      theme_bw()
+
+col_names <-names(full_functional_tibble)
+region_sum_subset <- col_names[grep("^region_sum", col_names)]
+region_mean_subset <- col_names[grep("^region_mean", col_names)]
+
+average_spike <- full_tibble %>% group_by( session_id,trail_id) %>% summarise(mean_spike = sum(region_sum_spike)/sum(region_count))
+
+average_spike$mouse_name <- full_functional_tibble$mouse_name
+average_spike$contrast_diff <- full_functional_tibble$contrast_diff
+average_spike$success <- full_functional_tibble$success
+##Average spike per session over time
+ggplot(average_spike, aes(x = trail_id, y = mean_spike)) + 
+  geom_line()+
+  geom_smooth(method = "loess")+  # Fit a smooth spline
+
+  facet_wrap(~session_id)
+##Average Spike per mouse over time (use average spike to predict success?)
+ggplot(average_spike, aes(x = trail_id, y = mean_spike)) + 
+  geom_line()+
+  geom_smooth(method = "loess")+  # Fit a smooth spline
+
+  facet_wrap(~mouse_name)
+
+##PCA
+features = full_functional_tibble[,1:40]
+scaled_features <- scale(features)
+pca_result <- prcomp(scaled_features)
+pc_df <- as.data.frame(pca_result$x)
+pc_df$session_id <- full_functional_tibble$session_id
+pc_df$mouse_name <- full_functional_tibble$mouse_name
+
+ggplot(pc_df, aes(x = PC1, y = PC2, color = session_id)) +
+  geom_point() +
+  labs(title = "PCA: PC1 vs PC2")
+
+ggplot(pc_df, aes(x = PC1, y = PC2, color = mouse_name)) +
+  geom_point() +
+  labs(title = "PCA: PC1 vs PC2")
+##predictive model
+predictive_feature <- c("session_id","trail_id","contrast_right","contrast_left", "contrast_diff" ,binename)
+
+
+predictive_dat <- full_functional_tibble[predictive_feature]
+#predictive_dat$success <- as.numeric(predictive_dat$success)
+predictive_dat$trail_id <- as.numeric(predictive_dat$trail_id)
+label <- as.numeric(full_functional_tibble$success)
+X <- model.matrix(~., predictive_dat)
+
+
+set.seed(123) # for reproducibility
+trainIndex <- createDataPartition(label, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+train_df <- predictive_dat[trainIndex, ]
+train_X <- X[trainIndex,]
+test_df <- predictive_dat[-trainIndex, ]
+test_X <- X[-trainIndex,]
+
+train_label <- label[trainIndex]
+test_label <- label[-trainIndex]
+
+#Results, Accuracy, Confusion Matrix, and AOC
+xgb_model <- xgboost(data = train_X, label = train_label, objective = "binary:logistic", nrounds=10)
+
+predictions <- predict(xgb_model, newdata = test_X)
+predicted_labels <- as.numeric(ifelse(predictions > 0.5, 1, 0))
+accuracy <- mean(predicted_labels == test_label)
+
+
+conf_matrix <- confusionMatrix(as.factor(predicted_labels), as.factor(test_label))
+
+
+auroc <- roc(test_label, predictions)
+
+
+```
+```{r, echo=FALSE}
+test=list()
+for(i in 1:2){
+  file_path <- sprintf("C:/STA 141A Project/test/test%d.rds", i)
+   test[[i]] <- readRDS(file_path)
+}
+
+get_trail_data <- function(session_id, trail_id, data_list) {
+  spikes <- data_list[[session_id]]$spks[[trail_id]]
+  if (any(is.na(spikes))){
+    print("value missing")  # Changed from `disp` to `print` as `disp` is not a standard R function
+  }
+
+  trail_tibble <- as_tibble(spikes) %>% 
+                  set_names(binename) %>%  
+                  add_column("brain_area" = data_list[[session_id]]$brain_area) %>% 
+                  group_by(brain_area) %>% 
+                  summarize("sum_spikes" = across(everything(), sum), .groups = "drop")
+  
+  trail_tibble <- tibble("neuron_spike" = rowSums(spikes)) %>%  
+                  add_column("brain_area" = data_list[[session_id]]$brain_area) %>% 
+                  group_by(brain_area) %>% 
+                  summarize(region_sum_spike = sum(neuron_spike), 
+                            region_count = n(),
+                            region_mean_spike = mean(neuron_spike),
+                            .groups = "drop") %>% 
+                  add_column("trail_id" = trail_id,
+                             "contrast_left" = data_list[[session_id]]$contrast_left[trail_id],
+                             "contrast_right" = data_list[[session_id]]$contrast_right[trail_id],
+                             "feedback_type" = data_list[[session_id]]$feedback_type[trail_id])
+  
+  return(trail_tibble)
+}
+
+get_session_data <- function(session_id, data_list) {
+  n_trail <- length(data_list[[session_id]]$spks)
+  trail_list <- list()
+  for (trail_id in 1:n_trail) {
+    trail_tibble <- get_trail_data(session_id, trail_id, data_list)
+    trail_list[[trail_id]] <- trail_tibble
+  }
+  session_tibble <- do.call(rbind, trail_list)
+  session_tibble <- session_tibble %>% 
+                    add_column("mouse_name" = data_list[[session_id]]$mouse_name, 
+                               "date_exp" = data_list[[session_id]]$date_exp, 
+                               "session_id" = session_id)
+  return(session_tibble)
+}
+
+test_list = list()  # Assuming 'test' is already defined and contains your test data
+
+for(session_id in 1:length(test)) {
+  test_list[[session_id]] <- get_session_data(session_id, test)
+  # Or use get_session_functional_data as needed
+}
+
+# Combine all session data into one tibble
+full_test_tibble <- do.call(rbind, test_list)
+get_session_functional_data <- function(session_id, data_list) {
+  n_trail <- length(data_list[[session_id]]$spks)
+  trail_list <- list()
+  for (trail_id in 1:n_trail) {
+    trail_tibble <- get_trail_functional_data(session_id, trail_id, data_list)  # Ensure this function is also adapted
+    trail_list[[trail_id]] <- trail_tibble
+  }
+  session_tibble <- as_tibble(do.call(rbind, trail_list))
+  session_tibble <- session_tibble %>% 
+                    add_column("mouse_name" = data_list[[session_id]]$mouse_name, 
+                               "date_exp" = data_list[[session_id]]$date_exp, 
+                               "session_id" = session_id)
+  return(session_tibble)
+}
+
+get_trail_functional_data <- function(session_id, trail_id, data_list) {
+  # Access spikes using the provided data_list
+  spikes <- data_list[[session_id]]$spks[[trail_id]]
+  
+  # Check for missing values in spikes as before
+  if (any(is.na(spikes))) {
+    print("value missing")  # Note: Ensure there is an appropriate way to handle this case in your real application
+  }
+
+  # Calculate the average spikes per bin
+  trail_bin_average <- matrix(colMeans(spikes, na.rm = TRUE), nrow = 1)
+  colnames(trail_bin_average) <- binename
+  
+  # Create a tibble with calculated data
+  trail_tibble <- as_tibble(trail_bin_average) %>%
+                  add_column(trail_id = trail_id) %>%
+                  add_column(contrast_left = data_list[[session_id]]$contrast_left[trail_id]) %>%
+                  add_column(contrast_right = data_list[[session_id]]$contrast_right[trail_id]) %>%
+                  add_column(feedback_type = data_list[[session_id]]$feedback_type[trail_id])
+                  
+  # Return the constructed tibble
+  return(trail_tibble)
+}
+test_list = list()
+for (session_id in 1:length(test)) {
+  test_list[[session_id]] <- get_session_functional_data(session_id, test)
+}
+
+full_test_tibble <- as_tibble(do.call(rbind, test_list))
+full_test_tibble$session_id <- as.factor(full_test_tibble$session_id)
+full_test_tibble$contrast_diff <- abs(full_test_tibble$contrast_left - full_test_tibble$contrast_right)
+
+full_test_tibble$success <- full_test_tibble$feedback_type == 1
+full_test_tibble$success <- as.numeric(full_test_tibble$success)
+
+
+```
+
+
+```{r testing, echo = FALSE}
+test=list()
+for(i in 1:2){
+  file_path <- sprintf("C:/STA 141A Project/test/test%d.rds", i)
+   test[[i]] <- readRDS(file_path)
+}
+
+
+predictive_test_dat_test <- full_test_tibble[predictive_feature]
+predictive_test_dat_test$trail_id <- as.numeric(predictive_test_dat_test$trail_id)
+
+
+test_label <- as.numeric(full_test_tibble$success)
+
+train_feature_names <- colnames(train_X)
+test_X_new <- model.matrix(~ ., data = predictive_test_dat_test)
+
+test_X_aligned <- as.data.frame(matrix(0, ncol = length(train_feature_names), nrow = nrow(test_X_new)))
+colnames(test_X_aligned) <- train_feature_names
+
+
+test_X_aligned <- matrix(0, nrow = nrow(test_X_new), ncol = length(train_feature_names))
+colnames(test_X_aligned) <- train_feature_names
+
+for (col_name in train_feature_names) {
+  if (col_name %in% colnames(test_X_new)) {
+    
+    test_X_aligned[, col_name] <- test_X_new[, col_name]
+  } else {
+    
+  }
+}
+
+
+test_X_aligned <- as.matrix(test_X_aligned)
+
+predictions_new <- predict(xgb_model, newdata = test_X_aligned)
+predicted_labels_new <- ifelse(predictions_new > 0.5, 1, 0)
+
+accuracy_new <- mean(predicted_labels_new == test_label)
+accuracy_new
+
+conf_matrix_new <- confusionMatrix(as.factor(predicted_labels_new), as.factor(test_label))
+
+
+auroc <- roc(test_label, predictions_new)
+
+conf_matrix_new
+auroc
+```
+# Prediction Performance on Test Sets
+
+After fitting the test data to the same format as the previous data. I used the new test data and compared it to the XGB model. After running the model. I achieved a 73% accuracy at predicting the success or fail of a mouse based on their neuronal data, and the difference in contrast between the two screens. 
+
+
+# Reference {-}
+
+ChatGPT was used in this project.
+
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x
+
+
+# Appendix 
+```{r appendix, eval=FALSE}
+library(readr)
+library(dplyr)    
+library(tidyr)
+library(ggplot2)
+library(tibble)
+library(caret)
+library(rlang)
+library(cli)
+library(tibble)
+library(ROCR)
+library(tidyverse)
+library(xgboost)
+library(pROC)
+
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('C:/STA 141A Project//Data/session',i,'.rds',sep=''))
+}
+
+describe_session <- function(session) {
+  num_neurons <- length(session$spks) 
+  num_trials <- length(session$contrast_left) 
+  stimuli_conditions <- unique(cbind(session$contrast_left, session$contrast_right))
+  feedback_types <- unique(session$feedback_type)
+
+}
+
+
+binename <- paste0("bin", as.character(1:40))
+get_trail_data <- function(session_id, trail_id){
+  spikes <- session[[session_id]]$spks[[trail_id]]
+  if (any(is.na(spikes))){
+    disp("value missing")
+  }
+
+  trail_tibble <- as_tibble(spikes) %>% set_names(binename) %>%  add_column("brain_area" = session[[session_id]]$brain_area ) %>% group_by(brain_area) %>% summarize( "sum_spikes" =across(everything(),sum),.groups = "drop") 
+  trail_tibble <- tibble("neuron_spike" = rowSums(spikes))  %>%  add_column("brain_area" = session[[session_id]]$brain_area ) %>% group_by(brain_area) %>% summarize( region_sum_spike = sum(neuron_spike), region_count = n(),region_mean_spike = mean(neuron_spike)) 
+  trail_tibble  = trail_tibble%>% add_column("trail_id" = trail_id) %>% add_column("contrast_left"= session[[session_id]]$contrast_left[trail_id]) %>% add_column("contrast_right"= session[[session_id]]$contrast_right[trail_id]) %>% add_column("feedback_type"= session[[session_id]]$feedback_type[trail_id])
+  
+}
+get_session_data <- function(session_id){
+  n_trail <- length(session[[session_id]]$spks)
+  trail_list <- list()
+  for (trail_id in 1:n_trail){
+    trail_tibble <- get_trail_data(session_id,trail_id)
+    trail_list[[trail_id]] <- trail_tibble
+  }
+  session_tibble <- do.call(rbind, trail_list)
+  session_tibble <- session_tibble %>% add_column("mouse_name" = session[[session_id]]$mouse_name) %>% add_column("date_exp" = session[[session_id]]$date_exp) %>% add_column("session_id" = session_id) 
+}
+
+session_list = list()
+for (session_id in 1: 18){
+  session_list[[session_id]] <- get_session_data(session_id)
+}
+full_tibble <- do.call(rbind, session_list)
+full_tibble$success <- full_tibble$feedback_type == 1
+full_tibble$success <- as.numeric(full_tibble$success)
+full_tibble$contrast_diff <- abs(full_tibble$contrast_left-full_tibble$contrast_right)
+
+binename <- paste0("bin", as.character(1:40))
+
+get_trail_functional_data <- function(session_id, trail_id){
+  spikes <- session[[session_id]]$spks[[trail_id]]
+  if (any(is.na(spikes))){
+    disp("value missing")
+  }
+
+  trail_bin_average <- matrix(colMeans(spikes), nrow = 1)
+  colnames(trail_bin_average) <- binename
+  trail_tibble  = as_tibble(trail_bin_average)%>% add_column("trail_id" = trail_id) %>% add_column("contrast_left"= session[[session_id]]$contrast_left[trail_id]) %>% add_column("contrast_right"= session[[session_id]]$contrast_right[trail_id]) %>% add_column("feedback_type"= session[[session_id]]$feedback_type[trail_id])
+  
+}
+get_session_functional_data <- function(session_id){
+  n_trail <- length(session[[session_id]]$spks)
+  trail_list <- list()
+  for (trail_id in 1:n_trail){
+    trail_tibble <- get_trail_functional_data(session_id,trail_id)
+    trail_list[[trail_id]] <- trail_tibble
+  }
+  session_tibble <- as_tibble(do.call(rbind, trail_list))
+  session_tibble <- session_tibble %>% add_column("mouse_name" = session[[session_id]]$mouse_name) %>% add_column("date_exp" = session[[session_id]]$date_exp) %>% add_column("session_id" = session_id) 
+}
+
+session_list = list()
+for (session_id in 1: 18){
+  session_list[[session_id]] <- get_session_functional_data(session_id)
+}
+full_functional_tibble <- as_tibble(do.call(rbind, session_list))
+full_functional_tibble$session_id <- as.factor(full_functional_tibble$session_id )
+full_functional_tibble$contrast_diff <- abs(full_functional_tibble$contrast_left-full_functional_tibble$contrast_right)
+
+full_functional_tibble$success <- full_functional_tibble$feedback_type == 1
+full_functional_tibble$success <- as.numeric(full_functional_tibble$success)
+
+full_tibble %>% filter (trail_id==1) %>% group_by(session_id) %>% summarise(sum(region_count))
+
+full_tibble %>% group_by(session_id) %>% summarise(unique_area = n_distinct(brain_area))
+
+average_spike <-full_tibble %>% group_by( session_id, trail_id) %>% mutate(mean_spike = sum(region_sum_spike)/sum(region_count))
+average_spike %>% group_by(session_id) %>% summarise(mean_session_spike = mean(mean_spike))
+
+
+full_functional_tibble %>% group_by(session_id) %>% summarize(success_rate = mean(success, na.rm = TRUE))
+
+
+full_functional_tibble %>% group_by(mouse_name) %>% summarize(success_rate = mean(success, na.rm = TRUE))
+
+full_functional_tibble %>% group_by(contrast_diff) %>% count() %>% 
+  ungroup() %>% 
+  mutate(perc = `n` / sum(`n`)) %>% 
+  arrange(perc) %>%
+  mutate(labels = scales::percent(perc))
+
+full_functional_tibble %>% group_by(contrast_diff) %>% summarize(success_rate = mean(success, na.rm = TRUE))
+
+counts_df <- full_functional_tibble[c('mouse_name', 'contrast_diff')]
+counts_df$contrast_diff <- as.factor(counts_df$contrast_diff)
+counts <- table(counts_df)
+
+percentages <- prop.table(counts, margin = 1)
+
+
+
+number_of_trials <- table(full_tibble$session_id)
+barplot(number_of_trials, main="Number of Trials per Session", xlab="Session ID", ylab="Number of Trials")
+
+feedback_types <- table(full_tibble$feedback_type)
+barplot(feedback_types, main="Feedback Types", xlab="Feedback Type", ylab="Count")
+session_10_data <- full_tibble %>% filter(session_id == 10)
+feedback_types_session_10 <- table(session_10_data$feedback_type)
+
+feedback_types_percentages <- round((feedback_types_session_10 / sum(feedback_types_session_10)) * 100, 1)
+
+# Create a bar plot for feedback types for session 10
+bp <- barplot(feedback_types_session_10, 
+              main = "Feedback Types for Session 10", 
+              xlab = "Feedback Type", 
+              ylab = "Count",
+              col = "blue", # You can choose a color
+              ylim = c(0, max(feedback_types_session_10) * 1.2)) # Extend y-limits for text
+
+text(x = bp, y = feedback_types_session_10, label = paste(feedback_types_percentages, "%"), pos = 3, cex = 0.8)
+
+
+feedback_types_overall <- full_tibble %>%
+  group_by(feedback_type) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(percentage = count / sum(count)) %>%
+  arrange(desc(percentage)) 
+ggplot(feedback_types_overall, aes(x = as.factor(feedback_type), y = percentage, fill = as.factor(feedback_type))) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = sprintf("%0.1f%%", percentage * 100)), vjust = -0.3, check_overlap = TRUE) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(title = "Overall Feedback Type Percentages", x = "Feedback Type", y = "Percentage") +
+  theme_minimal() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+
+
+
+
+success_rate_by_mouse <- full_tibble %>%
+  group_by(mouse_name) %>%
+  summarize(success_rate = mean(success))
+ggplot(success_rate_by_mouse, aes(x = mouse_name, y = success_rate, fill = mouse_name)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Success Rate by Mouse", x = "Mouse", y = "Success Rate") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+success_rate_by_session <- full_tibble %>%
+  group_by(session_id) %>%
+  summarize(success_rate = mean(success, na.rm = TRUE),
+            mouse_name = first(mouse_name)) 
+
+
+ggplot(success_rate_by_session, aes(x = as.factor(session_id), y = success_rate)) +
+  geom_bar(stat = "identity", aes(fill = as.factor(session_id))) +
+  geom_text(aes(label = mouse_name), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.25, 
+            check_overlap = TRUE) + # Prevent text label overlap
+  labs(title = "Success Rate by Session", x = "Session ID", y = "Success Rate") +
+  theme_minimal() +
+  theme(legend.position = "none", # Remove legend if not needed
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+plot_neural_activity <- function(session) {
+  average_spike_rate <- sapply(session$spks, function(neuron_spikes) rowMeans(neuron_spikes))
+  boxplot(average_spike_rate, main="Average Spike Rate per Neuron", ylab="Spike Rate", xlab="Neuron")
+}
+    
+plot_neural_activity(session[[10]])
+
+
+aggregate_sessions_by_mouse <- function(session) {
+  aggregated_by_mouse <- list()
+}
+  
+  for (i in seq_along(session)) {
+    current_session <- session[[i]]
+    mouse_name <- current_session[[4]]  # Accessing the mouse name
+
+
+ggplot(session_10_data, aes(x = trail_id, y = region_mean_spike)) +
+  geom_line(stat = "summary", fun = mean) +
+  labs(title = "Average Neural Activity per Trial for Session 10", 
+       x = "Trial ID", 
+       y = "Mean Spike Rate") +
+  theme_minimal()
+
+
+session_10_data <- full_tibble %>% 
+  filter(session_id == 10) %>%
+  arrange(trail_id) %>%
+  mutate(cumulative_success = cummean(success))
+ggplot(session_10_data, aes(x = trail_id, y = cumulative_success)) +
+  geom_line(group = 1, color = "blue") +
+  labs(title = "Cumulative Average Success Rate per Trial for Session 10", 
+       x = "Trial ID", 
+       y = "Cumulative Average Success Rate") +
+  theme_minimal()
+
+ggplot(full_tibble, aes(x = trail_id, y = region_mean_spike)) +
+  geom_line(stat='summary', fun.y=mean) +
+  labs(title="Average Neural Activity per Trial", x="Trial ID", y="Mean Spike Rate") +
+  theme_minimal()
+
+full_tibble <- full_tibble %>%
+  arrange(session_id, trail_id) %>%
+  group_by(session_id) %>%
+  mutate(cumulative_success = cummean(success)) %>%
+  ungroup()
+ggplot(full_tibble, aes(x = trail_id, y = cumulative_success, group = session_id, color = as.factor(session_id))) +
+  geom_line() +
+  labs(title = "Cumulative Average Success Rate per Trial Across All Sessions", 
+       x = "Trial ID", 
+       y = "Cumulative Average Success Rate") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+p <- ggplot(full_tibble, aes(x = trail_id, y = region_mean_spike, group = session_id, color = as.factor(session_id))) +
+  geom_line() +
+  labs(title="Neural Activity Change Across Trials", x="Trial ID", y="Average Spike Rate") +
+  theme_minimal()
+  p + theme(legend.position = "bottom") +
+    guides(color = guide_legend(nrow = 2, byrow = TRUE, title.position = "top", title.hjust = 0.5))
+  
+
+ggplot(full_tibble, aes(x = as.factor(session_id), y = region_mean_spike)) +
+  geom_boxplot() +
+  labs(title="Neural Activity Across Sessions", x="Session ID", y="Average Spike Rate") +
+  theme_minimal()
+
+
+ggplot(full_tibble, aes(x = mouse_name, y = region_mean_spike)) +
+  geom_boxplot() +
+  labs(title="Neural Activity Across Mice", x="Mouse Name", y="Average Spike Rate") +
+  theme_minimal()
+
+n.session=length(session)
+
+n_success = 0
+n_trial = 0
+for(i in 1:n.session){
+    tmp = session[[i]];
+    n_trial = n_trial + length(tmp$feedback_type);
+    n_success = n_success + sum(tmp$feedback_type == 1);
+}
+
+tmp10 = session[[10]];
+n_trial10 = 0
+n_success10 = 0
+n_trial10 = length(tmp10$feedback_type)
+n_success10 = sum(tmp10$feedback_type == 1)
+success_rate10 = n_success10 / n_trial10
+
+area = c()
+for(i in 1:n.session){
+    tmp = session[[i]];
+    area = c(area, unique(tmp10$brain_area))
+}
+
+area = unique(area)
+
+area10 = unique(tmp10$brain_area)
+n_unique_areas10 = length(area10)
+
+n_obs = length(session[[10]]$feedback_type)
+
+dat = tibble(
+    feedback_type = as.factor(session[[10]]$feedback_type),
+    decision = rep('name', n_obs),
+    avg_spikes = rep(0, n_obs)
+)
+
+for (i in 1:n_obs){
+    # decision 
+    if (session[[10]]$contrast_left[i] > session[[10]]$contrast_right[i]){
+        dat$decision[i] = '1' 
+    } else if (session[[10]]$contrast_left[i] < session[[10]]$contrast_right[i]){
+        dat$decision[i] = '2' 
+    } else if (session[[10]]$contrast_left[i] == session[[10]]$contrast_right[i] 
+               & session[[10]]$contrast_left[i] == 0){
+        dat$decision[i] = '3' 
+    } else{
+        dat$decision[i] = '4' 
+    }
+    spks.trial = session[[10]]$spks[[i]]
+    total.spikes = apply(spks.trial, 1, sum)  
+    dat$avg_spikes[i] = mean(total.spikes)  
+}
+
+dat$decision = as.factor(dat$decision)
+model_results <- list()
+
+percentages_df <- as.data.frame(as.table(percentages))
+names(percentages_df) <- c("mouse_name", "contrast_diff", "percentage")
+ggplot(percentages_df, aes(x = contrast_diff, y = percentage, fill = mouse_name)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "Contrast Difference", y = "Percentage", title = "Relationship between Contrast Difference and Percentage") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Pastel1")
+
+full_functional_tibble$trail_group = cut(full_functional_tibble$trail_id, breaks = seq(0, max(full_functional_tibble$trail_id), by = 25),include.lowest = TRUE)
+levels(full_functional_tibble$trail_group) <- seq(0, max(full_functional_tibble$trail_id), by = 25)[2:18]
+
+success_rate <- aggregate(success ~ session_id + trail_group, data = full_functional_tibble, FUN = function(x) mean(x) )
+ggplot(success_rate, aes(x = trail_group, y = success)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~session_id, ncol=3) +
+      theme_bw()
+
+success_rate <- aggregate(success ~ mouse_name + trail_group, data = full_functional_tibble, FUN = function(x) mean(x) )
+ggplot(success_rate, aes(x = trail_group, y = success)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~mouse_name) +
+      theme_bw()
+
+col_names <-names(full_functional_tibble)
+region_sum_subset <- col_names[grep("^region_sum", col_names)]
+region_mean_subset <- col_names[grep("^region_mean", col_names)]
+
+average_spike <- full_tibble %>% group_by( session_id,trail_id) %>% summarise(mean_spike = sum(region_sum_spike)/sum(region_count))
+
+average_spike$mouse_name <- full_functional_tibble$mouse_name
+average_spike$contrast_diff <- full_functional_tibble$contrast_diff
+average_spike$success <- full_functional_tibble$success
+
+ggplot(average_spike, aes(x = trail_id, y = mean_spike)) + 
+  geom_line()+
+  geom_smooth(method = "loess")+  # Fit a smooth spline
+
+  facet_wrap(~session_id)
+
+ggplot(average_spike, aes(x = trail_id, y = mean_spike)) + 
+  geom_line()+
+  geom_smooth(method = "loess")+  # Fit a smooth spline
+
+  facet_wrap(~mouse_name)
+
+
+features = full_functional_tibble[,1:40]
+scaled_features <- scale(features)
+pca_result <- prcomp(scaled_features)
+pc_df <- as.data.frame(pca_result$x)
+pc_df$session_id <- full_functional_tibble$session_id
+pc_df$mouse_name <- full_functional_tibble$mouse_name
+
+ggplot(pc_df, aes(x = PC1, y = PC2, color = session_id)) +
+  geom_point() +
+  labs(title = "PCA: PC1 vs PC2")
+
+ggplot(pc_df, aes(x = PC1, y = PC2, color = mouse_name)) +
+  geom_point() +
+  labs(title = "PCA: PC1 vs PC2")
+
+predictive_feature <- c("session_id","trail_id","contrast_right","contrast_left", "contrast_diff" ,binename)
+
+
+predictive_dat <- full_functional_tibble[predictive_feature]
+
+predictive_dat$trail_id <- as.numeric(predictive_dat$trail_id)
+label <- as.numeric(full_functional_tibble$success)
+X <- model.matrix(~., predictive_dat)
+
+
+set.seed(123) # for reproducibility
+trainIndex <- createDataPartition(label, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+train_df <- predictive_dat[trainIndex, ]
+train_X <- X[trainIndex,]
+test_df <- predictive_dat[-trainIndex, ]
+test_X <- X[-trainIndex,]
+
+train_label <- label[trainIndex]
+test_label <- label[-trainIndex]
+
+
+xgb_model <- xgboost(data = train_X, label = train_label, objective = "binary:logistic", nrounds=10)
+
+predictions <- predict(xgb_model, newdata = test_X)
+predicted_labels <- as.numeric(ifelse(predictions > 0.5, 1, 0))
+accuracy <- mean(predicted_labels == test_label)
+
+
+conf_matrix <- confusionMatrix(as.factor(predicted_labels), as.factor(test_label))
+
+
+auroc <- roc(test_label, predictions)
+test=list()
+for(i in 1:2){
+  file_path <- sprintf("C:/STA 141A Project/test/test%d.rds", i)
+   test[[i]] <- readRDS(file_path)
+}
+
+get_trail_data <- function(session_id, trail_id, data_list) {
+  spikes <- data_list[[session_id]]$spks[[trail_id]]
+  if (any(is.na(spikes))){
+    print("value missing")  # Changed from `disp` to `print` as `disp` is not a standard R function
+  }
+
+  trail_tibble <- as_tibble(spikes) %>% 
+                  set_names(binename) %>%  
+                  add_column("brain_area" = data_list[[session_id]]$brain_area) %>% 
+                  group_by(brain_area) %>% 
+                  summarize("sum_spikes" = across(everything(), sum), .groups = "drop")
+  
+  trail_tibble <- tibble("neuron_spike" = rowSums(spikes)) %>%  
+                  add_column("brain_area" = data_list[[session_id]]$brain_area) %>% 
+                  group_by(brain_area) %>% 
+                  summarize(region_sum_spike = sum(neuron_spike), 
+                            region_count = n(),
+                            region_mean_spike = mean(neuron_spike),
+                            .groups = "drop") %>% 
+                  add_column("trail_id" = trail_id,
+                             "contrast_left" = data_list[[session_id]]$contrast_left[trail_id],
+                             "contrast_right" = data_list[[session_id]]$contrast_right[trail_id],
+                             "feedback_type" = data_list[[session_id]]$feedback_type[trail_id])
+  
+  return(trail_tibble)
+}
+
+get_session_data <- function(session_id, data_list) {
+  n_trail <- length(data_list[[session_id]]$spks)
+  trail_list <- list()
+  for (trail_id in 1:n_trail) {
+    trail_tibble <- get_trail_data(session_id, trail_id, data_list)
+    trail_list[[trail_id]] <- trail_tibble
+  }
+  session_tibble <- do.call(rbind, trail_list)
+  session_tibble <- session_tibble %>% 
+                    add_column("mouse_name" = data_list[[session_id]]$mouse_name, 
+                               "date_exp" = data_list[[session_id]]$date_exp, 
+                               "session_id" = session_id)
+  return(session_tibble)
+}
+
+test_list = list()  # Assuming 'test' is already defined and contains your test data
+
+for(session_id in 1:length(test)) {
+  test_list[[session_id]] <- get_session_data(session_id, test)
+  # Or use get_session_functional_data as needed
+}
+
+
+full_test_tibble <- do.call(rbind, test_list)
+get_session_functional_data <- function(session_id, data_list) {
+  n_trail <- length(data_list[[session_id]]$spks)
+  trail_list <- list()
+  for (trail_id in 1:n_trail) {
+    trail_tibble <- get_trail_functional_data(session_id, trail_id, data_list)  # Ensure this function is also adapted
+    trail_list[[trail_id]] <- trail_tibble
+  }
+  session_tibble <- as_tibble(do.call(rbind, trail_list))
+  session_tibble <- session_tibble %>% 
+                    add_column("mouse_name" = data_list[[session_id]]$mouse_name, 
+                               "date_exp" = data_list[[session_id]]$date_exp, 
+                               "session_id" = session_id)
+  return(session_tibble)
+}
+
+get_trail_functional_data <- function(session_id, trail_id, data_list) {
+  
+  spikes <- data_list[[session_id]]$spks[[trail_id]]
+  
+  
+  if (any(is.na(spikes))) {
+    print("value missing")  # Note: Ensure there is an appropriate way to handle this case in your real application
+  }
+
+  
+  trail_bin_average <- matrix(colMeans(spikes, na.rm = TRUE), nrow = 1)
+  colnames(trail_bin_average) <- binename
+  
+
+  trail_tibble <- as_tibble(trail_bin_average) %>%
+                  add_column(trail_id = trail_id) %>%
+                  add_column(contrast_left = data_list[[session_id]]$contrast_left[trail_id]) %>%
+                  add_column(contrast_right = data_list[[session_id]]$contrast_right[trail_id]) %>%
+                  add_column(feedback_type = data_list[[session_id]]$feedback_type[trail_id])
+                  
+  
+  return(trail_tibble)
+}
+test_list = list()
+for (session_id in 1:length(test)) {
+  test_list[[session_id]] <- get_session_functional_data(session_id, test)
+}
+
+full_test_tibble <- as_tibble(do.call(rbind, test_list))
+full_test_tibble$session_id <- as.factor(full_test_tibble$session_id)
+full_test_tibble$contrast_diff <- abs(full_test_tibble$contrast_left - full_test_tibble$contrast_right)
+
+full_test_tibble$success <- full_test_tibble$feedback_type == 1
+full_test_tibble$success <- as.numeric(full_test_tibble$success)
+test=list()
+for(i in 1:2){
+  file_path <- sprintf("C:/STA 141A Project/test/test%d.rds", i)
+   test[[i]] <- readRDS(file_path)
+}
+
+
+predictive_test_dat_test <- full_test_tibble[predictive_feature]
+predictive_test_dat_test$trail_id <- as.numeric(predictive_test_dat_test$trail_id)
+
+
+test_label <- as.numeric(full_test_tibble$success)
+
+train_feature_names <- colnames(train_X)
+test_X_new <- model.matrix(~ ., data = predictive_test_dat_test)
+
+test_X_aligned <- as.data.frame(matrix(0, ncol = length(train_feature_names), nrow = nrow(test_X_new)))
+colnames(test_X_aligned) <- train_feature_names
+
+
+test_X_aligned <- matrix(0, nrow = nrow(test_X_new), ncol = length(train_feature_names))
+colnames(test_X_aligned) <- train_feature_names
+
+for (col_name in train_feature_names) {
+  if (col_name %in% colnames(test_X_new)) {
+    
+    test_X_aligned[, col_name] <- test_X_new[, col_name]
+  } else {
+    
+  }
+}
+
+
+test_X_aligned <- as.matrix(test_X_aligned)
+
+predictions_new <- predict(xgb_model, newdata = test_X_aligned)
+predicted_labels_new <- ifelse(predictions_new > 0.5, 1, 0)
+
+accuracy_new <- mean(predicted_labels_new == test_label)
+accuracy_new
+
+conf_matrix_new <- confusionMatrix(as.factor(predicted_labels_new), as.factor(test_label))
+
+
+auroc <- roc(test_label, predictions_new)
+
+conf_matrix_new
+auroc
